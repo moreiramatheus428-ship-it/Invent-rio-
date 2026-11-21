@@ -91,11 +91,7 @@
 
   const ALL_SYN = [].concat(...Object.values(SYN));
   function parseSheetRows(aoa) {
-    let best = 0, bestScore = -1;
-    for (let i = 0; i < Math.min(aoa.length, 15); i++) {
-      const sc = aoa[i].filter(c => ALL_SYN.includes(norm(c))).length;
-      if (sc > bestScore) { bestScore = sc; best = i; }
-    }
+    const best = 0; // sempre usa a primeira linha da planilha como cabeçalho
     const seen = {};
     const headers = (aoa[best] || []).map((h, i) => {
       let n = txt(h) || ('Coluna ' + (i + 1));
@@ -429,7 +425,8 @@
       S.raw[kind] = d; S.map[kind] = autoMap(kind, d.headers);
       const faltam = (REQ[kind] || []).filter(f => !S.map[kind][f]);
       recalc();
-      toast(KINDS[kind].nome + ': ' + fmt(d.rows.length) + ' linhas' + (faltam.length ? ' · confira o mapeamento de colunas' : ''), faltam.length ? 'warn' : 'ok');
+      toast(KINDS[kind].nome + ': ' + fmt(d.rows.length) + ' linhas carregadas' + (faltam.length ? ' · faltou reconhecer: ' + faltam.map(f => LABELS[f]).join(', ') : ''), faltam.length ? 'warn' : 'ok');
+      if (faltam.length) abrirMapa(kind);
     } catch (e) { toast('Erro ao ler: ' + e.message, 'err'); }
   }
 
@@ -454,7 +451,7 @@
         <div class="up-f">${ok ? `${esc(d.fileName)} · ${fmt(d.rows.length)} linhas` : 'Nenhum arquivo carregado'}</div>
         <div class="up-b">
           <label class="btn sm">Carregar Excel<input type="file" accept=".xlsx,.xls,.xlsm,.csv" data-up="${k}" hidden></label>
-          ${ok ? `<button class="btn sm ghost" data-map="${k}">Mapear colunas</button>` : ''}
+          ${ok && (REQ[k] || []).some(f => !S.map[k][f]) ? `<button class="btn sm ghost" data-map="${k}">Ajustar colunas</button>` : ''}
         </div></div>`;
     }).join('');
     $$('[data-up]').forEach(i => i.onchange = e => { carregar(i.dataset.up, e.target.files[0]); e.target.value = ''; });
