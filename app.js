@@ -12,6 +12,9 @@
     .toLowerCase().replace(/[^a-z0-9/ ]+/g, ' ').replace(/\s+/g, ' ').trim();
   const txt = v => String(v == null ? '' : v).trim();
   const KEY = v => txt(v).toUpperCase().replace(/\s+/g, ' ');
+  // remove sujeira de leitura no início do código (ex.: ">H1_PM1" vira "H1_PM1")
+  const cleanCode = v => txt(v).replace(/^[^A-Za-z0-9]+/, '').trim();
+  const parseBR = s => { const m = txt(s).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?/); return m ? new Date(+m[3], m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0)).getTime() : 0; };
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   /* ---------- reconhecimento automático de colunas ---------- */
@@ -27,21 +30,47 @@
     tipo: ['tipo', 'type', 'divergencia', 'discrepancy', 'ocorrencia', 'issue', 'resultado', 'result'],
     onda: ['onda', 'wave', 'wave number']
   };
+  Object.assign(SYN, {
+    parada: ['parada', 'stop', 'stop number'],
+    ponto: ['ponto', 'point'],
+    local: ['localizacao do pacote', 'localizacao', 'location', 'package location'],
+    detalhe: ['detalhe do pacote', 'detalhe', 'detail', 'package detail'],
+    placa: ['placa', 'plate', 'license plate', 'vehicle'],
+    data: ['data auditoria', 'data da auditoria', 'data', 'date', 'audit date', 'data hora', 'timestamp'],
+    idRota: ['id da rota', 'id rota', 'route id'],
+    rotaOrig: ['rota original', 'original route'],
+    doca: ['doca', 'dock'],
+    transp: ['transportadora', 'carrier'],
+    tipoVeic: ['tipo de veiculo', 'vehicle type'],
+    tipoRota: ['tipo de rota', 'route type'],
+    tipoArea: ['tipo de area', 'area type'],
+    cluster: ['cluster']
+  });
+  SYN.rota.push('n rota', 'no rota', 'numero rota', 'numero da rota', 'id da rota', 'route number', 'rota otimizada', 'optimized route');
+  SYN.opBipou.unshift('rep auditoria', 'rep', 'representante');
+  SYN.status = SYN.status.filter(s => s !== 'estado' && s !== 'state');
+  SYN.tipo.unshift('estado', 'state');
   const ORDER = {
     base: ['gaiola', 'desc', 'rota', 'id'],
-    sep: ['status', 'ciclo', 'gaiola', 'desc', 'rota', 'id'],
-    aud: ['opFinal', 'opBipou', 'tipo', 'status', 'ciclo', 'gaiola', 'desc', 'rota', 'id'],
-    rotas: ['onda', 'rota']
+    sep: ['status', 'ciclo', 'local', 'detalhe', 'parada', 'ponto', 'gaiola', 'desc', 'rota', 'id'],
+    aud: ['opFinal', 'opBipou', 'tipo', 'status', 'ciclo', 'data', 'gaiola', 'desc', 'rota', 'id'],
+    adu: ['opBipou', 'tipo', 'placa', 'data', 'rota', 'id'],
+    rotas: ['onda', 'idRota', 'rotaOrig', 'rota', 'doca', 'transp', 'placa', 'tipoVeic', 'tipoRota', 'tipoArea', 'cluster']
   };
+  const REQ = { sep: ['id', 'rota'], aud: ['id', 'gaiola'], adu: ['id', 'rota'], rotas: ['rota', 'onda'] };
   const LABELS = {
     id: 'ID do pacote', gaiola: 'Gaiola', rota: 'Rota', desc: 'Descrição', ciclo: 'Ciclo (AM/PM)',
     status: 'Status da gaiola', opBipou: 'Operador que bipou', opFinal: 'Operador que finalizou',
-    tipo: 'Tipo (a mais / faltante)', onda: 'Onda'
+    tipo: 'Estado (correto / a mais / faltante)', onda: 'Onda', parada: 'Parada', ponto: 'Ponto',
+    local: 'Localização do pacote', detalhe: 'Detalhe do pacote', placa: 'Placa', data: 'Data da auditoria',
+    idRota: 'ID da rota', rotaOrig: 'Rota original', doca: 'Doca', transp: 'Transportadora',
+    tipoVeic: 'Tipo de veículo', tipoRota: 'Tipo de rota', tipoArea: 'Tipo de área', cluster: 'Cluster'
   };
   const KINDS = {
     sep: { nome: 'Planilha de separação', ajuda: 'IDs e suas gaiolas/rotas (referência para o confronto)' },
-    aud: { nome: 'Planilha de auditoria', ajuda: 'IDs bipados, operadores e finalização' },
-    rotas: { nome: 'Lista de rotas / ondas', ajuda: 'Rota → Onda 1 a 5 (prioridade)' }
+    aud: { nome: 'Planilha de auditoria', ajuda: 'Gaiola, estado do ID (correto / a mais / faltante) e rep auditoria' },
+    adu: { nome: 'Planilha de aduana', ajuda: 'Rota, placa, estado do ID e rep auditoria (limpa os números após "|" da rota)' },
+    rotas: { nome: 'Lista de rotas / ondas', ajuda: 'Onda, rota otimizada, doca, transportadora, placa e cluster (prioridade)' }
   };
 
   function autoMap(kind, headers) {
@@ -89,8 +118,8 @@
     for (const v of vals) {
       const n = norm(v);
       if (!n) continue;
-      if (/\bpm\b|tarde|noite|afternoon|evening|night/.test(n)) return 'PM';
-      if (/\bam\b|manha|madrugada|morning/.test(n)) return 'AM';
+      if (/\bpm\d*\b|tarde|noite|afternoon|evening|night/.test(n)) return 'PM';
+      if (/\bam\d*\b|manha|madrugada|morning/.test(n)) return 'AM';
     }
     return '';
   }
@@ -116,7 +145,12 @@
      ===================================================================== */
   function compute(raw, map) {
     raw = raw || {}; map = map || {};
-    const col = (kind, row, f) => { const h = map[kind] && map[kind][f]; return h ? txt(row[h]) : ''; };
+    const col = (kind, row, f) => {
+      const h = map[kind] && map[kind][f]; let v = h ? txt(row[h]) : '';
+      if (f === 'rota' || f === 'gaiola') { if (kind === 'adu') v = v.split('|')[0]; v = cleanCode(v); } // aduana: remove "| 477222964"
+      return v;
+    };
+    const pick = i => ({ parada: i.parada || '', ponto: i.ponto || '', local: i.local || '', detalhe: i.detalhe || '' });
     const has = (kind, f) => !!(map[kind] && map[kind][f]);
 
     // Base de dados = verdade do sistema
@@ -131,7 +165,7 @@
       if (!G.has(name)) G.set(name, {
         gaiola: name, rotas: {}, descs: {}, ciclo: '', expected: new Set(), bipped: new Set(),
         exMissing: new Set(), exExtra: new Set(), opB: new Set(), opF: new Set(), opById: new Map(),
-        sepRows: 0, audRows: 0, sepStatus: [], audFinal: false, cancel: false, aberta: false, fechadaSep: false
+        sepRows: 0, audRows: 0, data: '', sepStatus: [], audFinal: false, cancel: false, aberta: false, fechadaSep: false
       });
       return G.get(name);
     };
@@ -140,16 +174,18 @@
     // Separação
     const sepInfo = new Map(); let sepHasIds = false;
     ((raw.sep && raw.sep.rows) || []).forEach(r => {
-      const name = txt(col('sep', r, 'gaiola')); if (!name) return;
+      const name = txt(col('sep', r, 'gaiola')) || txt(col('sep', r, 'rota')); if (!name) return;
       const g = get(name), id = KEY(col('sep', r, 'id')), rota = col('sep', r, 'rota'), desc = col('sep', r, 'desc'), st = col('sep', r, 'status');
       g.sepRows++; inc(g.rotas, rota); inc(g.descs, desc);
       g.ciclo = g.ciclo || cyc(col('sep', r, 'ciclo'), name);
       if (st) { if (isCancel(st)) g.cancel = true; else if (isAberta(st)) g.aberta = true; else if (isFechada(st)) g.fechadaSep = true; }
-      if (id) { sepHasIds = true; g.expected.add(id); sepInfo.set(id, { gaiola: name, rota, desc }); }
+      if (id) { sepHasIds = true; g.expected.add(id); sepInfo.set(id, { gaiola: name, rota, desc, parada: col('sep', r, 'parada'), ponto: col('sep', r, 'ponto'), local: col('sep', r, 'local'), detalhe: col('sep', r, 'detalhe') }); }
     });
 
     // Auditoria
     let audLoaded = !!(raw.aud && raw.aud.rows && raw.aud.rows.length);
+    // se a auditoria já traz o Estado de cada ID (Correto / A mais / Faltante), ele é a fonte da verdade
+    const audHasTipo = has('aud', 'tipo') && ((raw.aud && raw.aud.rows) || []).some(r => col('aud', r, 'tipo'));
     const audHasFinalInfo = has('aud', 'opFinal') || has('aud', 'status');
     ((raw.aud && raw.aud.rows) || []).forEach(r => {
       const id = KEY(col('aud', r, 'id'));
@@ -159,7 +195,9 @@
       const g = get(name), tipo = norm(col('aud', r, 'tipo')), ob = col('aud', r, 'opBipou'), of = col('aud', r, 'opFinal'), st = col('aud', r, 'status');
       g.audRows++; inc(g.rotas, col('aud', r, 'rota')); inc(g.descs, col('aud', r, 'desc'));
       g.ciclo = g.ciclo || cyc(col('aud', r, 'ciclo'), name);
-      if (ob) g.opB.add(ob);
+      const dt = col('aud', r, 'data'); if (dt && (!g.data || parseBR(dt) >= parseBR(g.data))) g.data = dt;
+      const isMiss = /falt|miss|short|lost/.test(tipo);
+      if (ob) { (isMiss ? g.opF : g.opB).add(ob); if (id) g.opById.set(id, ob); }
       if (of) { g.opF.add(of); g.audFinal = true; }
       if (st) { if (isCancel(st)) g.cancel = true; else if (isFechada(st)) g.audFinal = true; }
       if (id) {
@@ -182,9 +220,9 @@
 
       if (audited) {
         const extraSet = new Set(g.exExtra);
-        if (sepHasIds && inSep) g.bipped.forEach(id => { if (!g.expected.has(id)) extraSet.add(id); });
+        if (!audHasTipo && sepHasIds && inSep) g.bipped.forEach(id => { if (!g.expected.has(id)) extraSet.add(id); });
         const missSet = new Set(g.exMissing);
-        if (finalizada && sepHasIds) g.expected.forEach(id => { if (!g.bipped.has(id)) missSet.add(id); });
+        if (!audHasTipo && finalizada && sepHasIds) g.expected.forEach(id => { if (!g.bipped.has(id)) missSet.add(id); });
 
         extraSet.forEach(id => {
           const info = base.get(id) || sepInfo.get(id) || {};
@@ -192,15 +230,15 @@
           let tipo;
           if (!correta) tipo = 'nao_localizado'; else if (KEY(correta) === KEY(g.gaiola)) tipo = 'regularizado'; else tipo = 'a_mais';
           if (tipo === 'regularizado') regN++; else extraN++;
-          items.push({ id, tipo, gaiolaAtual: g.gaiola, gaiolaCorreta: correta, rotaCorreta: info.rota || '', desc: info.desc || '', operador: g.opById.get(id) || [...g.opB].join(', ') });
+          items.push({ id, tipo, gaiolaAtual: g.gaiola, gaiolaCorreta: correta, rotaCorreta: info.rota || '', desc: info.desc || '', ...pick(info), operador: g.opById.get(id) || [...g.opB].join(', ') });
         });
         missSet.forEach(id => {
-          const info = base.get(id) || {};
+          const info = base.get(id) || sepInfo.get(id) || {};
           const onde = info.gaiola || '';
           let tipo;
           if (onde && KEY(onde) !== KEY(g.gaiola)) tipo = 'regularizado_falt'; else tipo = 'faltante';
           if (tipo === 'faltante') missingN++; else regN++;
-          items.push({ id, tipo, gaiolaAtual: g.gaiola, gaiolaCorreta: onde, rotaCorreta: info.rota || '', desc: info.desc || '', operador: [...g.opF].join(', ') });
+          items.push({ id, tipo, gaiolaAtual: g.gaiola, gaiolaCorreta: onde, rotaCorreta: info.rota || '', desc: info.desc || '', ...pick(info), operador: g.opById.get(id) || [...g.opF].join(', ') });
         });
       }
 
@@ -216,22 +254,23 @@
       const rotaT = top(g.rotas), descT = top(g.descs);
       const rotasCorretas = [...new Set(items.filter(i => i.tipo === 'a_mais' && i.rotaCorreta).map(i => i.rotaCorreta))];
       gaiolas.push({
-        gaiola: g.gaiola, ciclo: g.ciclo || cyc(g.gaiola) || 'N/D', rota: rotaT ? rotaT[0] : '', desc: descT ? descT[0] : '',
-        status, audited, finalizada, inSep, esperados: g.expected.size, bipados: g.bipped.size,
+        gaiola: g.gaiola, ciclo: g.ciclo || cyc(g.gaiola) || 'N/D', rota: rotaT ? rotaT[0] : g.gaiola, desc: descT ? descT[0] : '',
+        status, audited, finalizada, inSep, data: g.data, esperados: g.expected.size, bipados: g.bipped.size,
         extraN, missingN, regN, opBipou: [...g.opB], opFinal: [...g.opF], rotasCorretas, items
       });
     });
     gaiolas.sort((a, b) => a.gaiola.localeCompare(b.gaiola, 'pt-BR', { numeric: true }));
 
     // Rotas / ondas / prioridade
-    const ondaMap = new Map();
+    const ondaMap = new Map(), infoMap = new Map();
     ((raw.rotas && raw.rotas.rows) || []).forEach(r => {
       const rt = KEY(col('rotas', r, 'rota')); if (!rt) return;
       ondaMap.set(rt, parseOnda(col('rotas', r, 'onda')));
+      infoMap.set(rt, { nome: col('rotas', r, 'rota'), idRota: col('rotas', r, 'idRota'), rotaOrig: col('rotas', r, 'rotaOrig'), doca: col('rotas', r, 'doca'), transp: col('rotas', r, 'transp'), placa: col('rotas', r, 'placa'), tipoVeic: col('rotas', r, 'tipoVeic'), tipoRota: col('rotas', r, 'tipoRota'), tipoArea: col('rotas', r, 'tipoArea'), cluster: col('rotas', r, 'cluster') });
     });
     const R = new Map();
-    const rget = (k, nome) => { if (!R.has(k)) R.set(k, { rota: nome, onda: ondaMap.has(k) ? ondaMap.get(k) : null, gaiolas: [] }); return R.get(k); };
-    ondaMap.forEach((o, k) => rget(k, k));
+    const rget = (k, nome) => { if (!R.has(k)) R.set(k, { rota: nome, onda: ondaMap.has(k) ? ondaMap.get(k) : null, gaiolas: [], info: infoMap.get(k) || {} }); return R.get(k); };
+    ondaMap.forEach((o, k) => rget(k, (infoMap.get(k) && infoMap.get(k).nome) || k));
     gaiolas.forEach(g => { if (g.rota) rget(KEY(g.rota), g.rota).gaiolas.push(g); });
     const rotas = [];
     R.forEach(r => {
@@ -265,7 +304,27 @@
     const ondas = {};
     rotas.forEach(r => { const k = r.onda == null ? 'Sem onda' : 'Onda ' + r.onda; (ondas[k] = ondas[k] || { red: 0, green: 0, gray: 0 })[r.ring]++; });
 
-    return { gaiolas, rotas, kpi, ciclos, ondas, sepHasIds, audLoaded, baseSize: base.size };
+    // Aduana: auditoria por rota/placa (o "| número" da rota já é removido em col())
+    const A = new Map();
+    ((raw.adu && raw.adu.rows) || []).forEach(r => {
+      const rota = col('adu', r, 'rota'); if (!rota) return;
+      const k = KEY(rota);
+      if (!A.has(k)) A.set(k, { rota, placas: new Set(), ops: new Set(), total: 0, correto: 0, a_mais: 0, faltante: 0, outros: 0, data: '', items: [] });
+      const a = A.get(k), t = norm(col('adu', r, 'tipo')), id = col('adu', r, 'id'), pl = col('adu', r, 'placa'), op = col('adu', r, 'opBipou'), dt = col('adu', r, 'data');
+      a.total++; if (pl) a.placas.add(pl); if (op) a.ops.add(op);
+      if (dt && (!a.data || parseBR(dt) >= parseBR(a.data))) a.data = dt;
+      let tipo = 'outros';
+      if (/falt|miss|short|lost/.test(t)) tipo = 'faltante';
+      else if (/mais|sobr|excess|extra|surplus|over/.test(t)) tipo = 'a_mais';
+      else if (/^(corret|ok$|correct)/.test(t)) tipo = 'correto';
+      a[tipo]++; a.items.push({ id, tipo, estado: col('adu', r, 'tipo'), placa: pl, operador: op, rota });
+    });
+    const aduana = [...A.values()].map(a => Object.assign(a, { placas: [...a.placas], ops: [...a.ops], diverg: a.a_mais + a.faltante }))
+      .sort((x, y) => y.diverg - x.diverg || String(x.rota).localeCompare(String(y.rota), 'pt-BR', { numeric: true }));
+    rotas.forEach(r => { const a = A.get(KEY(r.rota)); r.aduDiv = a ? a.diverg : 0; });
+    gaiolas.forEach(g => { const r = R.get(KEY(g.rota)); g.onda = r ? r.onda : null; g.doca = (r && r.info && r.info.doca) || ''; });
+
+    return { gaiolas, rotas, kpi, ciclos, ondas, aduana, sepHasIds, audLoaded, baseSize: base.size };
   }
 
   /* =====================================================================
@@ -312,7 +371,7 @@
   /* =====================================================================
      INTERFACE (somente no navegador)
      ===================================================================== */
-  const S = { raw: {}, map: {}, res: null, tab: 'dashboard', ciclo: 'todos', filtro: 'todas', busca: '', divTipo: 'todos', updated: null };
+  const S = { raw: {}, map: {}, res: null, tab: 'dashboard', ciclo: 'todos', filtro: 'todas', busca: '', divTipo: 'todos', aduFiltro: 'todas', updated: null };
   const $ = s => document.querySelector(s);
   const $$ = s => [...document.querySelectorAll(s)];
   let charts = {};
@@ -330,6 +389,16 @@
   const salvar = async () => { try { await DB.set('estado', { raw: S.raw, map: S.map, updated: S.updated }); } catch (e) { /* sem persistência */ } };
 
   /* ---- leitura de arquivo ---- */
+  function fixCell(h, v) {
+    if (typeof v === 'number') {
+      if (/data|date|hora/.test(norm(h)) && v > 30000 && v < 80000) {
+        const d = new Date(Math.round((v - 25569) * 86400) * 1000), p = n => String(n).padStart(2, '0');
+        return p(d.getUTCDate()) + '/' + p(d.getUTCMonth() + 1) + '/' + d.getUTCFullYear() + ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes());
+      }
+      return String(v); // IDs grandes sem notação científica
+    }
+    return v;
+  }
   function lerArquivo(kind, file) {
     return new Promise((resolve, reject) => {
       if (!root.XLSX) { reject(new Error('Biblioteca de Excel não carregou (verifique a internet).')); return; }
@@ -339,11 +408,12 @@
           const wb = XLSX.read(e.target.result, { type: 'array' });
           let best = null;
           wb.SheetNames.forEach(n => {
-            const aoa = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: '', raw: false });
+            const aoa = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: '', raw: true });
             if (!best || aoa.length > best.aoa.length) best = { aoa, n };
           });
           if (!best || !best.aoa.length) throw new Error('Planilha vazia');
           const { headers, rows } = parseSheetRows(best.aoa);
+          rows.forEach(r => headers.forEach(h => { r[h] = fixCell(h, r[h]); }));
           resolve({ headers, rows, fileName: file.name, aba: best.n });
         } catch (err) { reject(err); }
       };
@@ -357,7 +427,7 @@
     try {
       const d = await lerArquivo(kind, file);
       S.raw[kind] = d; S.map[kind] = autoMap(kind, d.headers);
-      const faltam = ORDER[kind].filter(f => ['id', 'gaiola', 'rota', 'onda'].includes(f) && !S.map[kind][f]);
+      const faltam = (REQ[kind] || []).filter(f => !S.map[kind][f]);
       recalc();
       toast(KINDS[kind].nome + ': ' + fmt(d.rows.length) + ' linhas' + (faltam.length ? ' · confira o mapeamento de colunas' : ''), faltam.length ? 'warn' : 'ok');
     } catch (e) { toast('Erro ao ler: ' + e.message, 'err'); }
@@ -457,12 +527,12 @@
   function vGaiolas() {
     const { base, pass, lista } = filtrar();
     const chips = [['todas', 'Todas'], ['fechada', 'Fechadas 100%'], ['a_mais', 'Com a mais'], ['faltante', 'Com faltante'], ['ajustada', 'Ajustadas'], ['pendente', 'Falta auditar'], ['cancelado', 'Canceladas']];
-    const rows = lista.slice(0, MAXROWS).map(g => `<tr class="click" data-g="${esc(g.gaiola)}"><td><b>${esc(g.gaiola)}</b></td><td>${g.ciclo}</td><td>${esc(g.rota)}</td><td>${g.bipados}/${g.esperados}</td><td>${g.extraN || '–'}</td><td>${g.missingN || '–'}</td><td>${badge(g.status)}</td><td>${esc(g.opBipou.join(', ')) || '–'}</td><td>${esc(g.opFinal.join(', ')) || '–'}</td></tr>`).join('');
+    const rows = lista.slice(0, MAXROWS).map(g => `<tr class="click" data-g="${esc(g.gaiola)}"><td><b>${esc(g.gaiola)}</b></td><td>${g.ciclo}</td><td>${esc(g.rota)}</td><td>${g.onda ? 'Onda ' + g.onda : '–'}</td><td>${esc(g.doca) || '–'}</td><td>${g.bipados}/${g.esperados}</td><td>${g.extraN || '–'}</td><td>${g.missingN || '–'}</td><td>${badge(g.status)}</td><td>${esc(g.opBipou.join(', ')) || '–'}</td><td>${esc(g.opFinal.join(', ')) || '–'}</td></tr>`).join('');
     return `<div class="card"><div class="filters">
       <div class="seg">${['todos', 'AM', 'PM'].map(c => `<button class="${S.ciclo === c ? 'on' : ''}" data-ciclo="${c}">${c === 'todos' ? 'AM + PM' : c}</button>`).join('')}</div>
       <input id="busca" class="search" placeholder="Buscar gaiola, rota ou ID do pacote…" value="${esc(S.busca)}"></div>
       <div class="chips">${chips.map(([k, l]) => `<button class="chip ${S.filtro === k ? 'on' : ''}" data-filtro="${k}">${l} <b>${base.filter(g => pass(g, k)).length}</b></button>`).join('')}</div>
-      <div class="tw"><table><thead><tr><th>Gaiola</th><th>Ciclo</th><th>Rota</th><th>Bipados/Esperados</th><th>A mais</th><th>Faltante</th><th>Situação</th><th>Operador (bipou)</th><th>Operador (finalizou)</th></tr></thead><tbody>${rows || '<tr><td colspan="9" class="mut">Nenhuma gaiola neste filtro.</td></tr>'}</tbody></table></div>
+      <div class="tw"><table><thead><tr><th>Gaiola</th><th>Ciclo</th><th>Rota</th><th>Onda</th><th>Doca</th><th>Bipados/Esperados</th><th>A mais</th><th>Faltante</th><th>Situação</th><th>Operador (bipou)</th><th>Operador (finalizou)</th></tr></thead><tbody>${rows || '<tr><td colspan="11" class="mut">Nenhuma gaiola neste filtro.</td></tr>'}</tbody></table></div>
       ${lista.length > MAXROWS ? `<p class="mut">Mostrando ${MAXROWS} de ${fmt(lista.length)}. Use a busca para refinar.</p>` : ''}</div>`;
   }
 
@@ -479,8 +549,8 @@
       <div class="card"><div class="row between"><h3>Divergências por ID <span class="count">${lista.length}</span></h3>
         <div class="seg">${[['todos', 'Todos'], ['a_mais', 'A mais'], ['faltante', 'Faltante']].map(([k, l]) => `<button class="${f === k ? 'on' : ''}" data-div="${k}">${l}</button>`).join('')}</div></div>
       <p class="mut">Cada ID foi confrontado com a Separação: a gaiola/rota corretas vêm de onde o ID foi separado.</p>
-      <div class="tw"><table><thead><tr><th>ID</th><th>Tipo</th><th>Gaiola atual</th><th>Rota</th><th>Descrição</th><th>Gaiola correta</th><th>Rota correta p/ atrelar</th><th>Operador</th></tr></thead><tbody>
-      ${lista.slice(0, MAXROWS).map(d => `<tr><td><b>${esc(d.id)}</b></td><td>${tipoTxt(d.tipo)}</td><td>${esc(d.gaiolaAtual)}</td><td>${esc(d.rota)}</td><td>${esc(d.desc) || '–'}</td><td>${esc(d.gaiolaCorreta) || 'não consta na separação'}</td><td>${esc(d.rotaCorreta) || '–'}</td><td>${esc(d.operador) || '–'}</td></tr>`).join('') || '<tr><td colspan="8" class="mut">Nenhuma divergência.</td></tr>'}</tbody></table></div>
+      <div class="tw"><table><thead><tr><th>ID</th><th>Tipo</th><th>Gaiola atual</th><th>Rota</th><th>Parada</th><th>Ponto</th><th>Localização do pacote</th><th>Detalhe</th><th>Gaiola correta</th><th>Rota correta p/ atrelar</th><th>Operador</th></tr></thead><tbody>
+      ${lista.slice(0, MAXROWS).map(d => `<tr><td><b>${esc(d.id)}</b></td><td>${tipoTxt(d.tipo)}</td><td>${esc(d.gaiolaAtual)}</td><td>${esc(d.rota)}</td><td>${esc(d.parada) || '–'}</td><td>${esc(d.ponto) || '–'}</td><td>${esc(d.local) || '–'}</td><td>${esc(d.detalhe) || '–'}</td><td>${esc(d.gaiolaCorreta) || 'não consta na separação'}</td><td>${esc(d.rotaCorreta) || '–'}</td><td>${esc(d.operador) || '–'}</td></tr>`).join('') || '<tr><td colspan="11" class="mut">Nenhuma divergência.</td></tr>'}</tbody></table></div>
       ${lista.length > MAXROWS ? `<p class="mut">Mostrando ${MAXROWS} de ${fmt(lista.length)}. Gere o PDF ou use a aba Gaiolas para detalhar.</p>` : ''}</div>`;
   }
 
@@ -504,7 +574,24 @@
       <div class="grid g-routes">${rs.map(r => `<div class="route ${r.ring}"><div class="route-h"><b>${esc(r.rota)}</b><span class="onda">${r.onda ? 'Onda ' + r.onda : 'Sem onda'}</span></div>
         ${r.ring === 'red' ? `<div class="prio">Prioridade #${r.prioridade}</div>` : r.ring === 'green' ? '<div class="okm">Tudo certo</div>' : '<div class="nm">Sem gaiolas na separação</div>'}
         <div class="route-s">${r.ok}/${r.total} gaiolas fechadas</div>
-        <div class="tags">${r.faltante ? `<span class="tag" style="--c:#dc2626">${r.faltante} faltante</span>` : ''}${r.a_mais ? `<span class="tag" style="--c:#d97706">${r.a_mais} a mais</span>` : ''}${r.nao_auditadas ? `<span class="tag" style="--c:#2563eb">${r.nao_auditadas} s/ auditar</span>` : ''}</div></div>`).join('')}</div>`;
+        <div class="route-s">${r.info && r.info.doca ? 'Doca ' + esc(r.info.doca) : ''}${r.info && r.info.transp ? ' · ' + esc(r.info.transp) : ''}</div>
+        <div class="route-s">${r.info ? esc(r.info.placa || '') : ''}${r.info && r.info.cluster ? ' · ' + esc(r.info.cluster) : ''}</div>
+        <div class="tags">${r.faltante ? `<span class="tag" style="--c:#dc2626">${r.faltante} faltante</span>` : ''}${r.a_mais ? `<span class="tag" style="--c:#d97706">${r.a_mais} a mais</span>` : ''}${r.nao_auditadas ? `<span class="tag" style="--c:#2563eb">${r.nao_auditadas} s/ auditar</span>` : ''}${r.aduDiv ? `<span class="tag" style="--c:#0d9488">${r.aduDiv} na aduana</span>` : ''}</div></div>`).join('')}</div>`;
+  }
+
+  function vAduana() {
+    const A = S.res.aduana, soma = k => A.reduce((s, a) => s + a[k], 0);
+    const lista = A.filter(a => S.aduFiltro === 'todas' || a.diverg > 0);
+    const divs = []; A.forEach(a => a.items.forEach(i => { if (i.tipo === 'a_mais' || i.tipo === 'faltante') divs.push(i); }));
+    const tTxt = t => t === 'a_mais' ? '<span class="badge" style="--c:#d97706">A mais</span>' : '<span class="badge" style="--c:#dc2626">Faltante</span>';
+    return `<div class="grid g-kpi3">${kpiCard('Pacotes na aduana', fmt(soma('total')), '#14213d')}${kpiCard('Corretos', fmt(soma('correto')), STATUS.fechada.cor)}${kpiCard('A mais / Faltante', fmt(soma('a_mais')) + ' / ' + fmt(soma('faltante')), STATUS.a_mais.cor)}</div>
+      <div class="card"><div class="row between"><h3>Aduana por rota <span class="count">${lista.length}</span></h3>
+        <div class="seg">${[['todas', 'Todas'], ['div', 'Com divergência']].map(([k, l]) => `<button class="${S.aduFiltro === k ? 'on' : ''}" data-adu="${k}">${l}</button>`).join('')}</div></div>
+      <div class="tw"><table><thead><tr><th>Rota</th><th>Placa</th><th>Pacotes</th><th>Corretos</th><th>A mais</th><th>Faltante</th><th>Rep auditoria</th><th>Última auditoria</th></tr></thead><tbody>
+      ${lista.slice(0, MAXROWS).map(a => `<tr><td><b>${esc(a.rota)}</b></td><td>${esc(a.placas.join(', ')) || '–'}</td><td>${a.total}</td><td>${a.correto}</td><td>${a.a_mais || '–'}</td><td>${a.faltante || '–'}</td><td>${esc(a.ops.join(', ')) || '–'}</td><td>${esc(a.data) || '–'}</td></tr>`).join('') || '<tr><td colspan="8" class="mut">Nenhuma rota neste filtro.</td></tr>'}</tbody></table></div></div>
+      <div class="card"><h3>Divergências por ID na aduana <span class="count">${divs.length}</span></h3>
+      <div class="tw"><table><thead><tr><th>ID</th><th>Estado</th><th>Rota</th><th>Placa</th><th>Rep auditoria</th></tr></thead><tbody>
+      ${divs.slice(0, MAXROWS).map(i => `<tr><td><b>${esc(i.id)}</b></td><td>${tTxt(i.tipo)}</td><td>${esc(i.rota)}</td><td>${esc(i.placa) || '–'}</td><td>${esc(i.operador) || '–'}</td></tr>`).join('') || '<tr><td colspan="5" class="mut">Nenhuma divergência na aduana.</td></tr>'}</tbody></table></div></div>`;
   }
 
   function vRelatorio() {
@@ -517,8 +604,8 @@
     const g = S.res.gaiolas.find(x => x.gaiola === nome); if (!g) return;
     const tipoTxt = t => ({ a_mais: 'A mais', nao_localizado: 'A mais (ID não localizado)', faltante: 'Faltante', regularizado: 'Regularizado (sistema confirma aqui)', regularizado_falt: 'Regularizado (sistema indica outra gaiola)' }[t]);
     $('#modal-body').innerHTML = `<div class="row between"><h3>${esc(g.gaiola)} ${badge(g.status)}</h3><button class="btn sm ghost" id="m-x">Fechar</button></div>
-      <div class="facts"><div><span>Ciclo</span><b>${g.ciclo}</b></div><div><span>Rota</span><b>${esc(g.rota) || '–'}</b></div><div><span>Bipados/Esperados</span><b>${g.bipados}/${g.esperados}</b></div><div><span>Operador que bipou</span><b>${esc(g.opBipou.join(', ')) || '–'}</b></div><div><span>Operador que finalizou</span><b>${esc(g.opFinal.join(', ')) || '–'}</b></div><div><span>Rota correta p/ atrelar</span><b>${esc(g.rotasCorretas.join(', ')) || '–'}</b></div></div>
-      <div class="tw"><table><thead><tr><th>ID</th><th>Resultado</th><th>Gaiola correta</th><th>Rota correta</th><th>Descrição</th></tr></thead><tbody>${g.items.map(i => `<tr><td><b>${esc(i.id)}</b></td><td>${tipoTxt(i.tipo)}</td><td>${esc(i.gaiolaCorreta) || '–'}</td><td>${esc(i.rotaCorreta) || '–'}</td><td>${esc(i.desc) || '–'}</td></tr>`).join('') || '<tr><td colspan="5" class="mut">Sem divergências de ID nesta gaiola.</td></tr>'}</tbody></table></div>`;
+      <div class="facts"><div><span>Ciclo</span><b>${g.ciclo}</b></div><div><span>Rota</span><b>${esc(g.rota) || '–'}</b></div><div><span>Bipados/Esperados</span><b>${g.bipados}/${g.esperados}</b></div><div><span>Operador que bipou</span><b>${esc(g.opBipou.join(', ')) || '–'}</b></div><div><span>Operador que finalizou</span><b>${esc(g.opFinal.join(', ')) || '–'}</b></div><div><span>Rota correta p/ atrelar</span><b>${esc(g.rotasCorretas.join(', ')) || '–'}</b></div><div><span>Última auditoria</span><b>${esc(g.data) || '–'}</b></div></div>
+      <div class="tw"><table><thead><tr><th>ID</th><th>Resultado</th><th>Gaiola correta</th><th>Rota correta</th><th>Parada</th><th>Ponto</th><th>Localização</th><th>Detalhe</th></tr></thead><tbody>${g.items.map(i => `<tr><td><b>${esc(i.id)}</b></td><td>${tipoTxt(i.tipo)}</td><td>${esc(i.gaiolaCorreta) || '–'}</td><td>${esc(i.rotaCorreta) || '–'}</td><td>${esc(i.parada) || '–'}</td><td>${esc(i.ponto) || '–'}</td><td>${esc(i.local) || '–'}</td><td>${esc(i.detalhe) || '–'}</td></tr>`).join('') || '<tr><td colspan="8" class="mut">Sem divergências de ID nesta gaiola.</td></tr>'}</tbody></table></div>`;
     $('#modal').classList.add('show'); $('#m-x').onclick = fecharModal;
   }
 
@@ -533,11 +620,12 @@
   }
 
   /* ---- render geral ---- */
-  const VIEWS = { dashboard: vDashboard, gaiolas: vGaiolas, auditoria: vAuditoria, conclusao: vConclusao, prioridade: vPrioridade, relatorio: vRelatorio };
+  const VIEWS = { dashboard: vDashboard, gaiolas: vGaiolas, auditoria: vAuditoria, conclusao: vConclusao, prioridade: vPrioridade, aduana: vAduana, relatorio: vRelatorio };
   function render() {
     $$('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === S.tab));
     const temDados = S.res && S.res.gaiolas.length;
-    $('#view').innerHTML = temDados || S.tab === 'prioridade' && S.res && S.res.rotas.length ? VIEWS[S.tab]() : vazio();
+    const mostra = temDados || (S.tab === 'prioridade' && S.res && S.res.rotas.length) || (S.tab === 'aduana' && S.res && S.res.aduana.length);
+    $('#view').innerHTML = mostra ? VIEWS[S.tab]() : vazio();
     $('#updated').textContent = S.updated ? 'Atualizado ' + S.updated.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : 'Sem dados';
     if (temDados) { const k = S.res.kpi; const el = $('#top-pct'); el.textContent = pct(k.pct); el.className = 'top-pct ' + (k.pct >= 100 ? 'g' : k.pct >= 80 ? 'y' : 'r'); }
     ligar(); if (S.tab === 'dashboard' && temDados) desenharGraficos();
@@ -547,6 +635,7 @@
     $$('[data-ciclo]').forEach(b => b.onclick = () => { S.ciclo = b.dataset.ciclo; render(); });
     $$('[data-filtro]').forEach(b => b.onclick = () => { S.filtro = b.dataset.filtro; render(); });
     $$('[data-div]').forEach(b => b.onclick = () => { S.divTipo = b.dataset.div; render(); });
+    $$('[data-adu]').forEach(b => b.onclick = () => { S.aduFiltro = b.dataset.adu; render(); });
     $$('[data-g]').forEach(r => r.onclick = () => abrirGaiola(r.dataset.g));
     $$('#view [data-up]').forEach(i => i.onchange = e => { carregar(i.dataset.up, e.target.files[0]); e.target.value = ''; });
     $$('[data-act]').forEach(b => b.onclick = () => { const a = b.dataset.act; if (a === 'menu') abrirDrawer(true); if (a === 'demo') { const d = buildDemo(); S.raw = d.raw; S.map = d.map; recalc(); } if (a === 'pdf') gerarPDF(); });
@@ -579,8 +668,8 @@
     if (charts.ciclo) { try { doc.addImage(charts.ciclo.toBase64Image(), 'PNG', 108, y, 88, 55); } catch (e) { } }
 
     doc.addPage(); y = titulo('Prioridade por rota e onda (rotas com pendência primeiro)', 18);
-    doc.autoTable({ startY: y, head: [['Prior.', 'Rota', 'Onda', 'Gaiolas OK/Total', 'Faltante', 'A mais', 'Falta auditar', 'Situação']], body: rotas.map(r => [r.prioridade || '–', r.rota, r.onda ? 'Onda ' + r.onda : 'Sem onda', r.ok + '/' + r.total, r.faltante, r.a_mais, r.nao_auditadas, r.ring === 'red' ? 'PENDENTE' : r.ring === 'green' ? 'Tudo certo' : 'Sem gaiolas']), headStyles: head, margin: { left: 14, right: 14 }, styles: { fontSize: 8.5 },
-      didParseCell: d => { if (d.section === 'body' && d.column.index === 7) { const t = d.cell.raw; d.cell.styles.textColor = t === 'PENDENTE' ? [220, 38, 38] : t === 'Tudo certo' ? [22, 163, 74] : [107, 114, 128]; d.cell.styles.fontStyle = 'bold'; } } });
+    doc.autoTable({ startY: y, head: [['Prior.', 'Rota', 'Onda', 'Doca', 'Transportadora', 'Gaiolas OK/Total', 'Faltante', 'A mais', 'Falta auditar', 'Situação']], body: rotas.map(r => [r.prioridade || '–', r.rota, r.onda ? 'Onda ' + r.onda : 'Sem onda', (r.info && r.info.doca) || '–', (r.info && r.info.transp) || '–', r.ok + '/' + r.total, r.faltante, r.a_mais, r.nao_auditadas, r.ring === 'red' ? 'PENDENTE' : r.ring === 'green' ? 'Tudo certo' : 'Sem gaiolas']), headStyles: head, margin: { left: 14, right: 14 }, styles: { fontSize: 8.5 },
+      didParseCell: d => { if (d.section === 'body' && d.column.index === 9) { const t = d.cell.raw; d.cell.styles.textColor = t === 'PENDENTE' ? [220, 38, 38] : t === 'Tudo certo' ? [22, 163, 74] : [107, 114, 128]; d.cell.styles.fontStyle = 'bold'; } } });
 
     const divs = []; gaiolas.forEach(g => g.items.forEach(i => { if (i.tipo === 'a_mais' || i.tipo === 'nao_localizado' || i.tipo === 'faltante') divs.push([i.id, i.tipo === 'faltante' ? 'Faltante' : 'A mais', i.gaiolaAtual, g.rota, i.gaiolaCorreta || 'não consta', i.rotaCorreta || '–', i.operador || '–']); }));
     doc.addPage(); y = titulo('Divergências por ID (a mais e faltante)', 18);
@@ -591,6 +680,10 @@
     y = titulo('Gaiolas que faltam auditar', y);
     doc.autoTable({ startY: y, head: [['Gaiola', 'Ciclo', 'Rota', 'Pacotes', 'Situação']], body: falta.length ? falta.map(g => [g.gaiola, g.ciclo, g.rota, g.esperados, STATUS[g.status].label]) : [['Todas auditadas', '', '', '', '']], headStyles: head, margin: { left: 14, right: 14 }, styles: { fontSize: 8.5 } });
 
+    if (S.res.aduana.length) {
+      doc.addPage(); y = titulo('Aduana por rota', 18);
+      doc.autoTable({ startY: y, head: [['Rota', 'Placa', 'Pacotes', 'Corretos', 'A mais', 'Faltante', 'Rep auditoria']], body: S.res.aduana.map(a => [a.rota, a.placas.join(', ') || '–', a.total, a.correto, a.a_mais, a.faltante, a.ops.join(', ') || '–']), headStyles: head, margin: { left: 14, right: 14 }, styles: { fontSize: 8.5 } });
+    }
     const fin = gaiolas.filter(g => g.status === 'fechada' || g.status === 'ajustada');
     doc.addPage(); y = titulo('Conclusão da auditoria: gaiolas fechadas e ajustadas', 18);
     doc.autoTable({ startY: y, head: [['Gaiola', 'Ciclo', 'Rota', 'Situação', 'Operador que finalizou']], body: fin.length ? fin.map(g => [g.gaiola, g.ciclo, g.rota, STATUS[g.status].label, g.opFinal.join(', ') || '–']) : [['Nenhuma ainda', '', '', '', '']], headStyles: head, margin: { left: 14, right: 14 }, styles: { fontSize: 8.5 } });
