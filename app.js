@@ -16,16 +16,16 @@
 
   /* ---------- reconhecimento automático de colunas ---------- */
   const SYN = {
-    id: ['id pacote', 'id do pacote', 'id', 'pacote', 'package id', 'shipment id', 'tracking', 'codigo', 'etiqueta'],
-    gaiola: ['gaiola', 'id gaiola', 'id da gaiola', 'cage', 'cage id', 'container'],
-    rota: ['rota', 'route', 'id rota', 'rota atual', 'rota separacao'],
-    desc: ['descricao', 'description', 'bairro', 'cidade', 'endereco', 'destino', 'produto'],
-    ciclo: ['ciclo', 'turno', 'periodo', 'am/pm', 'shift'],
-    status: ['status gaiola', 'status', 'situacao', 'estado'],
-    opBipou: ['operador bipou', 'operador que bipou', 'bipado por', 'operador', 'usuario', 'auditor', 'nome operador', 'user'],
-    opFinal: ['operador finalizou', 'operador que finalizou', 'finalizado por', 'finalizou', 'usuario finalizou', 'operador final'],
-    tipo: ['tipo', 'divergencia', 'ocorrencia', 'resultado'],
-    onda: ['onda', 'wave']
+    id: ['id pacote', 'id do pacote', 'id', 'pacote', 'package id', 'package', 'parcel id', 'parcel', 'shipment id', 'tracking', 'tracking number', 'tracking id', 'waybill', 'barcode', 'codigo', 'etiqueta'],
+    gaiola: ['gaiola', 'id gaiola', 'id da gaiola', 'cage', 'cage id', 'cage number', 'cage name', 'cage code', 'container'],
+    rota: ['rota', 'route', 'route id', 'route name', 'route code', 'id rota', 'rota atual', 'rota separacao'],
+    desc: ['descricao', 'description', 'item description', 'bairro', 'neighborhood', 'district', 'cidade', 'city', 'endereco', 'address', 'destino', 'destination', 'produto', 'product'],
+    ciclo: ['ciclo', 'cycle', 'turno', 'periodo', 'period', 'am/pm', 'shift'],
+    status: ['status gaiola', 'cage status', 'status', 'situacao', 'estado', 'state'],
+    opBipou: ['operador bipou', 'operador que bipou', 'bipado por', 'scanned by', 'scanner', 'operador', 'operator', 'operator name', 'audited by', 'usuario', 'auditor', 'nome operador', 'user'],
+    opFinal: ['operador finalizou', 'operador que finalizou', 'finalizado por', 'finalizou', 'usuario finalizou', 'operador final', 'finished by', 'finalized by', 'closed by', 'completed by', 'operator finished', 'finalizer'],
+    tipo: ['tipo', 'type', 'divergencia', 'discrepancy', 'ocorrencia', 'issue', 'resultado', 'result'],
+    onda: ['onda', 'wave', 'wave number']
   };
   const ORDER = {
     base: ['gaiola', 'desc', 'rota', 'id'],
@@ -39,8 +39,7 @@
     tipo: 'Tipo (a mais / faltante)', onda: 'Onda'
   };
   const KINDS = {
-    base: { nome: 'Base de dados', ajuda: 'Verdade do sistema: ID → gaiola e rota corretas' },
-    sep: { nome: 'Planilha de separação', ajuda: 'IDs e suas gaiolas/rotas, status da gaiola' },
+    sep: { nome: 'Planilha de separação', ajuda: 'IDs e suas gaiolas/rotas (referência para o confronto)' },
     aud: { nome: 'Planilha de auditoria', ajuda: 'IDs bipados, operadores e finalização' },
     rotas: { nome: 'Lista de rotas / ondas', ajuda: 'Rota → Onda 1 a 5 (prioridade)' }
   };
@@ -90,14 +89,14 @@
     for (const v of vals) {
       const n = norm(v);
       if (!n) continue;
-      if (/\bpm\b|tarde|noite/.test(n)) return 'PM';
-      if (/\bam\b|manha|madrugada/.test(n)) return 'AM';
+      if (/\bpm\b|tarde|noite|afternoon|evening|night/.test(n)) return 'PM';
+      if (/\bam\b|manha|madrugada|morning/.test(n)) return 'AM';
     }
     return '';
   }
   const isCancel = s => /cancel/.test(norm(s));
-  const isAberta = s => /nao fech|n fech|abert|pendente|open|nao finaliz|andamento/.test(norm(s));
-  const isFechada = s => !isAberta(s) && /fechad|closed|finaliz|conclu/.test(norm(s));
+  const isAberta = s => /nao fech|n fech|abert|pendente|open|nao finaliz|andamento|pending|not clos|unclos|not final|not complet|incomplete|in progress/.test(norm(s));
+  const isFechada = s => !isAberta(s) && /fechad|closed|finaliz|final|conclu|complet|done/.test(norm(s));
   const parseOnda = v => { const m = txt(v).match(/\d+/); return m ? parseInt(m[0], 10) : null; };
 
   const STATUS = {
@@ -164,10 +163,10 @@
       if (of) { g.opF.add(of); g.audFinal = true; }
       if (st) { if (isCancel(st)) g.cancel = true; else if (isFechada(st)) g.audFinal = true; }
       if (id) {
-        if (/falt/.test(tipo)) g.exMissing.add(id);
+        if (/falt|miss|short|lost/.test(tipo)) g.exMissing.add(id);
         else {
           g.bipped.add(id);
-          if (/mais|sobr|excess|extra/.test(tipo)) g.exExtra.add(id);
+          if (/mais|sobr|excess|extra|surplus|overage|over/.test(tipo)) g.exExtra.add(id);
           if (ob) g.opById.set(id, ob);
         }
       }
@@ -300,7 +299,7 @@
       bip.forEach(id => aud.push({ 'ID Pacote': id, 'Gaiola': p.nome, 'Rota': p.rota, 'Operador Bipou': op, 'Operador Finalizou': opF, 'Tipo': '' }));
     });
     const mk = (kind, rows, nome) => { const headers = Object.keys(rows[0]); return { headers, rows, fileName: nome }; };
-    const raw = { base: mk('base', base, 'Base de dados (exemplo)'), sep: mk('sep', sep, 'Separação (exemplo)'), aud: mk('aud', aud, 'Auditoria (exemplo)'), rotas: mk('rotas', rotas, 'Lista de rotas (exemplo)') };
+    const raw = { sep: mk('sep', sep, 'Separação (exemplo)'), aud: mk('aud', aud, 'Auditoria (exemplo)'), rotas: mk('rotas', rotas, 'Lista de rotas (exemplo)') };
     const map = {}; Object.keys(raw).forEach(k => map[k] = autoMap(k, raw[k].headers));
     return { raw, map };
   }
@@ -422,7 +421,7 @@
 
   /* ---- views ---- */
   const vazio = () => `<div class="empty card"><div class="empty-ico">▦</div><h2>Nenhum dado carregado</h2>
-    <p>Abra o menu <b>☰</b> e carregue as planilhas (Base de dados, Separação, Auditoria e Lista de rotas) para ver o resultado do confronto.</p>
+    <p>Abra o menu <b>☰</b> e carregue as planilhas (Separação, Auditoria e Lista de rotas) para ver o resultado do confronto.</p>
     <div class="row center"><button class="btn" data-act="menu">Abrir menu</button><button class="btn ghost" data-act="demo">Ver com dados de exemplo</button></div></div>`;
 
   function kpiCard(t, v, cor, sub) { return `<div class="kpi card" style="--c:${cor}"><div class="kpi-t">${t}</div><div class="kpi-v">${v}</div>${sub ? `<div class="kpi-s">${sub}</div>` : ''}</div>`; }
@@ -479,9 +478,9 @@
       ${falta.slice(0, MAXROWS).map(g => `<tr class="click" data-g="${esc(g.gaiola)}"><td><b>${esc(g.gaiola)}</b></td><td>${g.ciclo}</td><td>${esc(g.rota)}</td><td>${esc(g.desc) || '–'}</td><td>${g.esperados}</td><td>${badge(g.status)}</td><td>${esc(g.opBipou.join(', ')) || '–'}</td></tr>`).join('') || '<tr><td colspan="7" class="mut">Todas as gaiolas já foram auditadas.</td></tr>'}</tbody></table></div></div>
       <div class="card"><div class="row between"><h3>Divergências por ID <span class="count">${lista.length}</span></h3>
         <div class="seg">${[['todos', 'Todos'], ['a_mais', 'A mais'], ['faltante', 'Faltante']].map(([k, l]) => `<button class="${f === k ? 'on' : ''}" data-div="${k}">${l}</button>`).join('')}</div></div>
-      <p class="mut">Cada ID foi confrontado com a Base de dados: a gaiola/rota corretas vêm do sistema.</p>
+      <p class="mut">Cada ID foi confrontado com a Separação: a gaiola/rota corretas vêm de onde o ID foi separado.</p>
       <div class="tw"><table><thead><tr><th>ID</th><th>Tipo</th><th>Gaiola atual</th><th>Rota</th><th>Descrição</th><th>Gaiola correta</th><th>Rota correta p/ atrelar</th><th>Operador</th></tr></thead><tbody>
-      ${lista.slice(0, MAXROWS).map(d => `<tr><td><b>${esc(d.id)}</b></td><td>${tipoTxt(d.tipo)}</td><td>${esc(d.gaiolaAtual)}</td><td>${esc(d.rota)}</td><td>${esc(d.desc) || '–'}</td><td>${esc(d.gaiolaCorreta) || 'não consta na base'}</td><td>${esc(d.rotaCorreta) || '–'}</td><td>${esc(d.operador) || '–'}</td></tr>`).join('') || '<tr><td colspan="8" class="mut">Nenhuma divergência.</td></tr>'}</tbody></table></div>
+      ${lista.slice(0, MAXROWS).map(d => `<tr><td><b>${esc(d.id)}</b></td><td>${tipoTxt(d.tipo)}</td><td>${esc(d.gaiolaAtual)}</td><td>${esc(d.rota)}</td><td>${esc(d.desc) || '–'}</td><td>${esc(d.gaiolaCorreta) || 'não consta na separação'}</td><td>${esc(d.rotaCorreta) || '–'}</td><td>${esc(d.operador) || '–'}</td></tr>`).join('') || '<tr><td colspan="8" class="mut">Nenhuma divergência.</td></tr>'}</tbody></table></div>
       ${lista.length > MAXROWS ? `<p class="mut">Mostrando ${MAXROWS} de ${fmt(lista.length)}. Gere o PDF ou use a aba Gaiolas para detalhar.</p>` : ''}</div>`;
   }
 
@@ -490,7 +489,7 @@
     const tb = (arr, aj2) => arr.slice(0, MAXROWS).map(g => `<tr class="click" data-g="${esc(g.gaiola)}"><td><b>${esc(g.gaiola)}</b></td><td>${g.ciclo}</td><td>${esc(g.rota)}</td><td>${g.bipados}/${g.esperados}</td>${aj2 ? `<td>${g.regN} ID(s) regularizado(s) pelo sistema</td>` : ''}<td>${esc(g.opFinal.join(', ')) || '–'}</td></tr>`).join('');
     return `<div class="grid g-kpi3">${kpiCard('Conclusão da auditoria', pct(kpi.pct), kpi.pct >= 100 ? '#16a34a' : '#d97706', 'meta 100%')}${kpiCard('Fechadas 100%', fmt(ok.length), STATUS.fechada.cor)}${kpiCard('Ajustadas e fechadas sem erro', fmt(aj.length), STATUS.ajustada.cor)}</div>
       <div class="card"><h3>Gaiolas fechadas 100% <span class="count">${ok.length}</span></h3><div class="tw"><table><thead><tr><th>Gaiola</th><th>Ciclo</th><th>Rota</th><th>Bipados/Esperados</th><th>Operador (finalizou)</th></tr></thead><tbody>${tb(ok, false) || '<tr><td colspan="5" class="mut">Nenhuma ainda.</td></tr>'}</tbody></table></div></div>
-      <div class="card"><h3>Gaiolas ajustadas (fechadas sem erro) <span class="count">${aj.length}</span></h3><p class="mut">Tiveram divergência na bipagem, mas o confronto com a Base de dados confirmou que o ID está correto no sistema.</p><div class="tw"><table><thead><tr><th>Gaiola</th><th>Ciclo</th><th>Rota</th><th>Bipados/Esperados</th><th>Ajuste</th><th>Operador (finalizou)</th></tr></thead><tbody>${tb(aj, true) || '<tr><td colspan="6" class="mut">Nenhuma ainda.</td></tr>'}</tbody></table></div></div>`;
+      <div class="card"><h3>Gaiolas ajustadas (fechadas sem erro) <span class="count">${aj.length}</span></h3><p class="mut">Tiveram divergência na bipagem, mas o confronto com a Separação confirmou que o ID está correto.</p><div class="tw"><table><thead><tr><th>Gaiola</th><th>Ciclo</th><th>Rota</th><th>Bipados/Esperados</th><th>Ajuste</th><th>Operador (finalizou)</th></tr></thead><tbody>${tb(aj, true) || '<tr><td colspan="6" class="mut">Nenhuma ainda.</td></tr>'}</tbody></table></div></div>`;
   }
 
   function vPrioridade() {
@@ -611,7 +610,7 @@
     document.addEventListener('keydown', e => { if (e.key === 'Escape') { abrirDrawer(false); fecharModal(); } });
     $('#btn-pdf').onclick = gerarPDF;
     $('#btn-limpar').onclick = () => { if (confirm('Limpar todos os dados carregados?')) { S.raw = {}; S.map = {}; S.res = null; S.updated = null; render(); renderDrawer(); salvar(); abrirDrawer(false); } };
-    try { const e = await DB.get('estado'); if (e && e.raw) { S.raw = e.raw; S.map = e.map; S.updated = e.updated ? new Date(e.updated) : null; S.res = compute(S.raw, S.map); } } catch (err) { }
+    try { const e = await DB.get('estado'); if (e && e.raw) { S.raw = e.raw; S.map = e.map; delete S.raw.base; delete S.map.base; S.updated = e.updated ? new Date(e.updated) : null; S.res = compute(S.raw, S.map); } } catch (err) { }
     render(); renderDrawer();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
