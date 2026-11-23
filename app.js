@@ -68,7 +68,7 @@
   };
   const KINDS = {
     sep: { nome: 'Planilha de separação', ajuda: 'IDs e suas gaiolas/rotas (referência para o confronto)' },
-    aud: { nome: 'Planilha de auditoria', ajuda: 'Gaiola, estado do ID (correto / a mais / faltante) e rep auditoria' },
+    aud: { nome: 'Planilha de auditoria', ajuda: 'Gaiola, estado do ID e rep auditoria. Cada carga é SOMADA ao histórico (detecta as ajustadas)' },
     adu: { nome: 'Planilha de aduana', ajuda: 'Rota, placa, estado do ID e rep auditoria (limpa os números após "|" da rota)' },
     rotas: { nome: 'Lista de rotas / ondas', ajuda: 'Onda, rota otimizada, doca, transportadora, placa e cluster (prioridade)' }
   };
@@ -160,7 +160,7 @@
     const get = name => {
       if (!G.has(name)) G.set(name, {
         gaiola: name, rotas: {}, descs: {}, ciclo: '', expected: new Set(), bipped: new Set(),
-        exMissing: new Set(), exExtra: new Set(), opB: new Set(), opF: new Set(), opById: new Map(),
+        hist: new Map(), fixed: new Set(), exMissing: new Set(), exExtra: new Set(), opB: new Set(), opF: new Set(), opById: new Map(),
         sepRows: 0, audRows: 0, data: '', sepStatus: [], audFinal: false, cancel: false, aberta: false, fechadaSep: false
       });
       return G.get(name);
@@ -197,6 +197,8 @@
       if (of) { g.opF.add(of); g.audFinal = true; }
       if (st) { if (isCancel(st)) g.cancel = true; else if (isFechada(st)) g.audFinal = true; }
       if (id) {
+        const hl = g.hist.get(id) || []; g.hist.set(id, hl);
+        hl.push({ ts: parseBR(col('aud', r, 'data')) || 0, seq: g.audRows, miss: isMiss, extra: /mais|sobr|excess|extra|surplus|overage|over/.test(tipo) });
         if (/falt|miss|short|lost/.test(tipo)) g.exMissing.add(id);
         else {
           g.bipped.add(id);
@@ -214,7 +216,25 @@
       const inSep = g.sepRows > 0;
       const items = []; let extraN = 0, missingN = 0, regN = 0;
 
+      // Reauditoria: vale o ÚLTIMO estado de cada ID (pela data). Se já teve a mais/faltante e
+      // o último registro é "Correto", o ID foi corrigido e a gaiola conta como ajustada.
+      if (audHasTipo) {
+        g.exMissing = new Set(); g.exExtra = new Set(); g.fixed = new Set();
+        g.hist.forEach((arr, id) => {
+          arr.sort((a, b) => a.ts - b.ts || a.seq - b.seq);
+          const last = arr[arr.length - 1];
+          if (last.miss) g.exMissing.add(id);
+          else if (last.extra) g.exExtra.add(id);
+          else if (arr.some(x => x.miss || x.extra)) g.fixed.add(id);
+        });
+      }
+
       if (audited) {
+        g.fixed.forEach(id => {
+          const info = sepInfo.get(id) || {};
+          regN++;
+          items.push({ id, tipo: 'corrigido', gaiolaAtual: g.gaiola, gaiolaCorreta: g.gaiola, rotaCorreta: info.rota || '', desc: info.desc || '', ...pick(info), operador: g.opById.get(id) || '' });
+        });
         const extraSet = new Set(g.exExtra);
         if (!audHasTipo && sepHasIds && inSep) g.bipped.forEach(id => { if (!g.expected.has(id)) extraSet.add(id); });
         const missSet = new Set(g.exMissing);
@@ -422,10 +442,22 @@
     toast('Lendo ' + file.name + '…');
     try {
       const d = await lerArquivo(kind, file);
-      S.raw[kind] = d; S.map[kind] = autoMap(kind, d.headers);
+      let msg = null;
+      const ant = S.raw[kind];
+      // Auditoria acumula: soma as linhas novas ao histórico (sem duplicar linhas iguais)
+      if (kind === 'aud' && ant && ant.rows && ant.rows.length && ant.headers.join('|') === d.headers.join('|')) {
+        const sig = r => d.headers.map(h => txt(r[h])).join('\u0001');
+        const vistos = new Set(ant.rows.map(sig));
+        const novas = d.rows.filter(r => { const s = sig(r); if (vistos.has(s)) return false; vistos.add(s); return true; });
+        S.raw.aud = { headers: ant.headers, rows: ant.rows.concat(novas), fileName: ant.fileName.split(' + ')[0] + ' + ' + d.fileName, aba: d.aba };
+        S.map.aud = autoMap('aud', S.raw.aud.headers);
+        msg = 'Auditoria acumulada: +' + fmt(novas.length) + ' novas linhas (' + fmt(d.rows.length - novas.length) + ' já existiam) · total ' + fmt(S.raw.aud.rows.length);
+      } else {
+        S.raw[kind] = d; S.map[kind] = autoMap(kind, d.headers);
+      }
       const faltam = (REQ[kind] || []).filter(f => !S.map[kind][f]);
       recalc();
-      toast(KINDS[kind].nome + ': ' + fmt(d.rows.length) + ' linhas carregadas' + (faltam.length ? ' · faltou reconhecer: ' + faltam.map(f => LABELS[f]).join(', ') : ''), faltam.length ? 'warn' : 'ok');
+      toast(msg || (KINDS[kind].nome + ': ' + fmt(d.rows.length) + ' linhas carregadas' + (faltam.length ? ' · faltou reconhecer: ' + faltam.map(f => LABELS[f]).join(', ') : '')), faltam.length ? 'warn' : 'ok');
       if (faltam.length) abrirMapa(kind);
     } catch (e) { toast('Erro ao ler: ' + e.message, 'err'); }
   }
@@ -452,10 +484,18 @@
         <div class="up-b">
           <label class="btn sm">Carregar Excel<input type="file" accept=".xlsx,.xls,.xlsm,.csv" data-up="${k}" hidden></label>
           ${ok && (REQ[k] || []).some(f => !S.map[k][f]) ? `<button class="btn sm ghost" data-map="${k}">Ajustar colunas</button>` : ''}
+          ${ok ? `<button class="btn sm ghost" data-clear="${k}">${k === 'aud' ? 'Limpar auditoria' : 'Limpar'}</button>` : ''}
         </div></div>`;
     }).join('');
     $$('[data-up]').forEach(i => i.onchange = e => { carregar(i.dataset.up, e.target.files[0]); e.target.value = ''; });
     $$('[data-map]').forEach(b => b.onclick = () => abrirMapa(b.dataset.map));
+    $$('[data-clear]').forEach(b => b.onclick = () => {
+      const k = b.dataset.clear;
+      if (!confirm('Limpar ' + KINDS[k].nome + '? ' + (k === 'aud' ? 'O histórico acumulado de auditorias será apagado.' : 'Os dados carregados serão apagados.'))) return;
+      delete S.raw[k]; delete S.map[k]; S.tab = S.tab;
+      S.res = compute(S.raw, S.map); S.updated = new Date(); render(); renderDrawer(); salvar();
+      toast(KINDS[k].nome + ' limpa', 'ok');
+    });
   }
   const abrirDrawer = v => { $('#drawer').classList.toggle('open', v); $('#scrim').classList.toggle('show', v); };
 
@@ -537,7 +577,7 @@
     const gs = S.res.gaiolas;
     const falta = gs.filter(g => PENDENTES.includes(g.status));
     const divs = [];
-    gs.forEach(g => g.items.forEach(i => { if (i.tipo !== 'regularizado' && i.tipo !== 'regularizado_falt') divs.push(Object.assign({ ciclo: g.ciclo, rota: g.rota }, i)); }));
+    gs.forEach(g => g.items.forEach(i => { if (i.tipo !== 'regularizado' && i.tipo !== 'regularizado_falt' && i.tipo !== 'corrigido') divs.push(Object.assign({ ciclo: g.ciclo, rota: g.rota }, i)); }));
     const f = S.divTipo, lista = divs.filter(d => f === 'todos' || (f === 'a_mais' && (d.tipo === 'a_mais' || d.tipo === 'nao_localizado')) || (f === 'faltante' && d.tipo === 'faltante'));
     const tipoTxt = t => t === 'a_mais' ? '<span class="badge" style="--c:#d97706">A mais</span>' : t === 'nao_localizado' ? '<span class="badge" style="--c:#d97706">A mais · ID não localizado</span>' : '<span class="badge" style="--c:#dc2626">Faltante</span>';
     return `<div class="card"><div class="row between"><h3>Gaiolas que faltam auditar <span class="count">${falta.length}</span></h3></div>
@@ -553,10 +593,10 @@
 
   function vConclusao() {
     const gs = S.res.gaiolas, ok = gs.filter(g => g.status === 'fechada'), aj = gs.filter(g => g.status === 'ajustada'), { kpi } = S.res;
-    const tb = (arr, aj2) => arr.slice(0, MAXROWS).map(g => `<tr class="click" data-g="${esc(g.gaiola)}"><td><b>${esc(g.gaiola)}</b></td><td>${g.ciclo}</td><td>${esc(g.rota)}</td><td>${g.bipados}/${g.esperados}</td>${aj2 ? `<td>${g.regN} ID(s) regularizado(s) pelo sistema</td>` : ''}<td>${esc(g.opFinal.join(', ')) || '–'}</td></tr>`).join('');
+    const tb = (arr, aj2) => arr.slice(0, MAXROWS).map(g => `<tr class="click" data-g="${esc(g.gaiola)}"><td><b>${esc(g.gaiola)}</b></td><td>${g.ciclo}</td><td>${esc(g.rota)}</td><td>${g.bipados}/${g.esperados}</td>${aj2 ? `<td>${g.regN} ID(s) corrigido(s) na reauditoria</td>` : ''}<td>${esc(g.opFinal.join(', ')) || '–'}</td></tr>`).join('');
     return `<div class="grid g-kpi3">${kpiCard('Conclusão da auditoria', pct(kpi.pct), kpi.pct >= 100 ? '#16a34a' : '#d97706', 'meta 100%')}${kpiCard('Fechadas 100%', fmt(ok.length), STATUS.fechada.cor)}${kpiCard('Ajustadas e fechadas sem erro', fmt(aj.length), STATUS.ajustada.cor)}</div>
       <div class="card"><h3>Gaiolas fechadas 100% <span class="count">${ok.length}</span></h3><div class="tw"><table><thead><tr><th>Gaiola</th><th>Ciclo</th><th>Rota</th><th>Bipados/Esperados</th><th>Operador (finalizou)</th></tr></thead><tbody>${tb(ok, false) || '<tr><td colspan="5" class="mut">Nenhuma ainda.</td></tr>'}</tbody></table></div></div>
-      <div class="card"><h3>Gaiolas ajustadas (fechadas sem erro) <span class="count">${aj.length}</span></h3><p class="mut">Tiveram divergência na bipagem, mas o confronto com a Separação confirmou que o ID está correto.</p><div class="tw"><table><thead><tr><th>Gaiola</th><th>Ciclo</th><th>Rota</th><th>Bipados/Esperados</th><th>Ajuste</th><th>Operador (finalizou)</th></tr></thead><tbody>${tb(aj, true) || '<tr><td colspan="6" class="mut">Nenhuma ainda.</td></tr>'}</tbody></table></div></div>`;
+      <div class="card"><h3>Gaiolas ajustadas (fechadas sem erro) <span class="count">${aj.length}</span></h3><p class="mut">Tiveram a mais ou faltante, mas foram reauditadas e o último registro de cada ID ficou Correto.</p><div class="tw"><table><thead><tr><th>Gaiola</th><th>Ciclo</th><th>Rota</th><th>Bipados/Esperados</th><th>Ajuste</th><th>Operador (finalizou)</th></tr></thead><tbody>${tb(aj, true) || '<tr><td colspan="6" class="mut">Nenhuma ainda.</td></tr>'}</tbody></table></div></div>`;
   }
 
   function vPrioridade() {
@@ -599,7 +639,7 @@
   /* ---- detalhe da gaiola ---- */
   function abrirGaiola(nome) {
     const g = S.res.gaiolas.find(x => x.gaiola === nome); if (!g) return;
-    const tipoTxt = t => ({ a_mais: 'A mais', nao_localizado: 'A mais (ID não localizado)', faltante: 'Faltante', regularizado: 'Regularizado (sistema confirma aqui)', regularizado_falt: 'Regularizado (sistema indica outra gaiola)' }[t]);
+    const tipoTxt = t => ({ a_mais: 'A mais', nao_localizado: 'A mais (ID não localizado)', faltante: 'Faltante', corrigido: 'Corrigido (reauditado como correto)', regularizado: 'Regularizado (sistema confirma aqui)', regularizado_falt: 'Regularizado (sistema indica outra gaiola)' }[t]);
     $('#modal-body').innerHTML = `<div class="row between"><h3>${esc(g.gaiola)} ${badge(g.status)}</h3><button class="btn sm ghost" id="m-x">Fechar</button></div>
       <div class="facts"><div><span>Ciclo</span><b>${g.ciclo}</b></div><div><span>Rota</span><b>${esc(g.rota) || '–'}</b></div><div><span>Bipados/Esperados</span><b>${g.bipados}/${g.esperados}</b></div><div><span>Operador que bipou</span><b>${esc(g.opBipou.join(', ')) || '–'}</b></div><div><span>Operador que finalizou</span><b>${esc(g.opFinal.join(', ')) || '–'}</b></div><div><span>Rota correta p/ atrelar</span><b>${esc(g.rotasCorretas.join(', ')) || '–'}</b></div><div><span>Última auditoria</span><b>${esc(g.data) || '–'}</b></div></div>
       <div class="tw"><table><thead><tr><th>ID</th><th>Resultado</th><th>Gaiola correta</th><th>Rota correta</th><th>Parada</th><th>Ponto</th><th>Localização</th><th>Detalhe</th></tr></thead><tbody>${g.items.map(i => `<tr><td><b>${esc(i.id)}</b></td><td>${tipoTxt(i.tipo)}</td><td>${esc(i.gaiolaCorreta) || '–'}</td><td>${esc(i.rotaCorreta) || '–'}</td><td>${esc(i.parada) || '–'}</td><td>${esc(i.ponto) || '–'}</td><td>${esc(i.local) || '–'}</td><td>${esc(i.detalhe) || '–'}</td></tr>`).join('') || '<tr><td colspan="8" class="mut">Sem divergências de ID nesta gaiola.</td></tr>'}</tbody></table></div>`;
