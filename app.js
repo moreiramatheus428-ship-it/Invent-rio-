@@ -114,11 +114,14 @@
     for (const v of vals) {
       const n = norm(v);
       if (!n) continue;
+      if (/\bcpm\d*\b/.test(n)) return 'CPM';
+      if (/\bsd\d*\b/.test(n)) return 'SD';
       if (/\bpm\d*\b|tarde|noite|afternoon|evening|night/.test(n)) return 'PM';
       if (/\bam\d*\b|manha|madrugada|morning/.test(n)) return 'AM';
     }
     return '';
   }
+  const CICLOS = ['AM', 'PM', 'SD', 'CPM', 'N/D'];
   const isCancel = s => /cancel/.test(norm(s));
   const isAberta = s => /nao fech|n fech|abert|pendente|open|nao finaliz|andamento|pending|not clos|unclos|not final|not complet|incomplete|in progress/.test(norm(s));
   const isFechada = s => !isAberta(s) && /fechad|closed|finaliz|final|conclu|complet|done/.test(norm(s));
@@ -179,6 +182,7 @@
     });
 
     // Auditoria
+    const IDH = new Map(); let gseq = 0; // histórico global por ID (todas as gaiolas)
     let audLoaded = !!(raw.aud && raw.aud.rows && raw.aud.rows.length);
     // se a auditoria já traz o Estado de cada ID (Correto / A mais / Faltante), ele é a fonte da verdade
     const audHasTipo = has('aud', 'tipo') && ((raw.aud && raw.aud.rows) || []).some(r => col('aud', r, 'tipo'));
@@ -197,6 +201,8 @@
       if (of) { g.opF.add(of); g.audFinal = true; }
       if (st) { if (isCancel(st)) g.cancel = true; else if (isFechada(st)) g.audFinal = true; }
       if (id) {
+        const gl = IDH.get(id) || []; IDH.set(id, gl);
+        gl.push({ ts: parseBR(col('aud', r, 'data')) || 0, seq: ++gseq, gaiola: name, miss: isMiss, extra: /mais|sobr|excess|extra|surplus|overage|over/.test(tipo), op: ob, data: col('aud', r, 'data') });
         const hl = g.hist.get(id) || []; g.hist.set(id, hl);
         hl.push({ ts: parseBR(col('aud', r, 'data')) || 0, seq: g.audRows, miss: isMiss, extra: /mais|sobr|excess|extra|surplus|overage|over/.test(tipo) });
         if (/falt|miss|short|lost/.test(tipo)) g.exMissing.add(id);
@@ -223,9 +229,12 @@
         g.hist.forEach((arr, id) => {
           arr.sort((a, b) => a.ts - b.ts || a.seq - b.seq);
           const last = arr[arr.length - 1];
-          if (last.miss) g.exMissing.add(id);
-          else if (last.extra) g.exExtra.add(id);
-          else if (arr.some(x => x.miss || x.extra)) g.fixed.add(id);
+          const gl = (IDH.get(id) || []).slice().sort((a, b) => a.ts - b.ts || a.seq - b.seq), glast = gl[gl.length - 1];
+          // erro nesta gaiola já foi resolvido se o último registro do ID (em qualquer gaiola) é "Correto" e é posterior
+          const resolvido = glast && !glast.miss && !glast.extra && (glast.ts > last.ts || (glast.ts === last.ts && glast.seq > last.seq));
+          if (last.miss || last.extra) {
+            if (resolvido) g.fixed.add(id); else if (last.miss) g.exMissing.add(id); else g.exExtra.add(id);
+          } else if (arr.some(x => x.miss || x.extra)) g.fixed.add(id);
         });
       }
 
@@ -277,6 +286,22 @@
     });
     gaiolas.sort((a, b) => a.gaiola.localeCompare(b.gaiola, 'pt-BR', { numeric: true }));
 
+    // Registro de ajustes por ID: onde errou, rota correta e se já foi corrigido
+    const ajustes = [];
+    if (audHasTipo) IDH.forEach((arr, id) => {
+      arr.sort((a, b) => a.ts - b.ts || a.seq - b.seq);
+      const erros = arr.filter(x => x.miss || x.extra); if (!erros.length) return;
+      const last = arr[arr.length - 1], err = erros[erros.length - 1], info = sepInfo.get(id) || {};
+      const corrigido = !last.miss && !last.extra;
+      const certa = info.gaiola || (corrigido ? last.gaiola : '');
+      ajustes.push({
+        id, erro: err.miss ? 'faltante' : 'a_mais', gaiolaErro: err.gaiola, rotaCorreta: certa, rotaSep: info.rota || '',
+        dataErro: err.data, opErro: err.op, corrigido, gaiolaFinal: corrigido ? last.gaiola : '', dataCorrecao: corrigido ? last.data : '', opCorrecao: corrigido ? last.op : '',
+        parada: info.parada || '', ponto: info.ponto || '', local: info.local || '', detalhe: info.detalhe || '', _ts: err.ts
+      });
+    });
+    ajustes.sort((a, b) => (a.corrigido - b.corrigido) || String(a.gaiolaErro).localeCompare(String(b.gaiolaErro), 'pt-BR', { numeric: true }));
+
     // Rotas / ondas / prioridade
     const ondaMap = new Map(), infoMap = new Map();
     ((raw.rotas && raw.rotas.rows) || []).forEach(r => {
@@ -312,7 +337,7 @@
     const okN = cnt.fechada + cnt.ajustada;
     const kpi = { total: gaiolas.length, vivas, ok: okN, pct: vivas ? okN / vivas * 100 : 0, cnt, meta: 100 };
     const ciclos = {};
-    ['AM', 'PM', 'N/D'].forEach(c => { ciclos[c] = {}; Object.keys(STATUS).forEach(k => ciclos[c][k] = 0); ciclos[c].total = 0; });
+    CICLOS.forEach(c => { ciclos[c] = {}; Object.keys(STATUS).forEach(k => ciclos[c][k] = 0); ciclos[c].total = 0; });
     gaiolas.forEach(g => { const c = ciclos[g.ciclo] ? g.ciclo : 'N/D'; ciclos[c][g.status]++; ciclos[c].total++; });
     Object.values(ciclos).forEach(c => {
       const v = c.total - c.cancelado; c.pct = v ? (c.fechada + c.ajustada) / v * 100 : 0;
@@ -340,7 +365,7 @@
     rotas.forEach(r => { const a = A.get(KEY(r.rota)); r.aduDiv = a ? a.diverg : 0; });
     gaiolas.forEach(g => { const r = R.get(KEY(g.rota)); g.onda = r ? r.onda : null; g.doca = (r && r.info && r.info.doca) || ''; });
 
-    return { gaiolas, rotas, kpi, ciclos, ondas, aduana, sepHasIds, audLoaded, baseSize: base.size };
+    return { gaiolas, rotas, kpi, ciclos, ondas, aduana, ajustes, sepHasIds, audLoaded, baseSize: base.size };
   }
 
   /* =====================================================================
@@ -387,7 +412,7 @@
   /* =====================================================================
      INTERFACE (somente no navegador)
      ===================================================================== */
-  const S = { raw: {}, map: {}, res: null, tab: 'dashboard', ciclo: 'todos', filtro: 'todas', busca: '', divTipo: 'todos', aduFiltro: 'todas', updated: null };
+  const S = { raw: {}, map: {}, res: null, tab: 'dashboard', ciclo: 'todos', filtro: 'todas', busca: '', divTipo: 'todos', ajFiltro: 'todos', aduFiltro: 'todas', updated: null };
   const $ = s => document.querySelector(s);
   const $$ = s => [...document.querySelectorAll(s)];
   let charts = {};
@@ -536,7 +561,7 @@
   function vDashboard() {
     const { kpi, ciclos } = S.res, c = kpi.cnt, atingiu = kpi.pct >= kpi.meta - 1e-9;
     const cor = atingiu ? '#16a34a' : kpi.pct >= 80 ? '#d97706' : '#dc2626';
-    const linhas = ['AM', 'PM', 'N/D'].filter(k => ciclos[k].total).map(k => `<tr><td><b>${k}</b></td><td>${ciclos[k].total}</td><td>${ciclos[k].fechada}</td><td>${ciclos[k].ajustada}</td><td>${ciclos[k].a_mais}</td><td>${ciclos[k].faltante}</td><td>${ciclos[k].pendente + ciclos[k].aberta + ciclos[k].em_auditoria}</td><td>${ciclos[k].cancelado}</td><td><b>${pct(ciclos[k].pct)}</b></td></tr>`).join('');
+    const linhas = CICLOS.filter(k => ciclos[k].total).map(k => `<tr><td><b>${k}</b></td><td>${ciclos[k].total}</td><td>${ciclos[k].fechada}</td><td>${ciclos[k].ajustada}</td><td>${ciclos[k].a_mais}</td><td>${ciclos[k].faltante}</td><td>${ciclos[k].pendente + ciclos[k].aberta + ciclos[k].em_auditoria}</td><td>${ciclos[k].cancelado}</td><td><b>${pct(ciclos[k].pct)}</b></td></tr>`).join('');
     const prio = S.res.rotas.filter(r => r.ring === 'red').slice(0, 5);
     return `<div class="grid g-hero">
       <div class="card meta" style="--c:${cor}"><div class="meta-h"><span>Gaiolas fechadas · meta ${kpi.meta}%</span><span class="pill" style="--c:${cor}">${atingiu ? 'Meta atingida' : 'Abaixo da meta'}</span></div>
@@ -555,7 +580,7 @@
         <div class="card"><h3>Resultado por ciclo</h3><div class="chart"><canvas id="ch-ciclo"></canvas></div></div>
       </div>
       <div class="grid g-2">
-        <div class="card"><h3>Resultado por ciclo (AM / PM)</h3><div class="tw"><table><thead><tr><th>Ciclo</th><th>Gaiolas</th><th>Fechadas</th><th>Ajust.</th><th>A mais</th><th>Faltante</th><th>Pend.</th><th>Canc.</th><th>% fechadas</th></tr></thead><tbody>${linhas || '<tr><td colspan="9" class="mut">Sem dados</td></tr>'}</tbody></table></div></div>
+        <div class="card"><h3>Resultado por ciclo (AM, PM, SD e CPM)</h3><div class="tw"><table><thead><tr><th>Ciclo</th><th>Gaiolas</th><th>Fechadas</th><th>Ajust.</th><th>A mais</th><th>Faltante</th><th>Pend.</th><th>Canc.</th><th>% fechadas</th></tr></thead><tbody>${linhas || '<tr><td colspan="9" class="mut">Sem dados</td></tr>'}</tbody></table></div></div>
         <div class="card"><div class="row between"><h3>Prioridades agora</h3><button class="btn sm ghost" data-tab="prioridade">Ver todas</button></div>
           ${prio.length ? prio.map(r => `<div class="mini red"><b>#${r.prioridade} · ${esc(r.rota)}</b><span>${r.onda ? 'Onda ' + r.onda : 'Sem onda'}</span><span>${r.pend} pendente(s)</span></div>`).join('') : '<p class="mut">Nenhuma rota pendente. Carregue a lista de rotas para ver as prioridades por onda.</p>'}
         </div></div>`;
@@ -566,7 +591,7 @@
     const chips = [['todas', 'Todas'], ['fechada', 'Fechadas 100%'], ['a_mais', 'Com a mais'], ['faltante', 'Com faltante'], ['ajustada', 'Ajustadas'], ['pendente', 'Falta auditar'], ['cancelado', 'Canceladas']];
     const rows = lista.slice(0, MAXROWS).map(g => `<tr class="click" data-g="${esc(g.gaiola)}"><td><b>${esc(g.gaiola)}</b></td><td>${g.ciclo}</td><td>${esc(g.rota)}</td><td>${g.onda ? 'Onda ' + g.onda : '–'}</td><td>${esc(g.doca) || '–'}</td><td>${g.bipados}/${g.esperados}</td><td>${g.extraN || '–'}</td><td>${g.missingN || '–'}</td><td>${badge(g.status)}</td><td>${esc(g.opBipou.join(', ')) || '–'}</td><td>${esc(g.opFinal.join(', ')) || '–'}</td></tr>`).join('');
     return `<div class="card"><div class="filters">
-      <div class="seg">${['todos', 'AM', 'PM'].map(c => `<button class="${S.ciclo === c ? 'on' : ''}" data-ciclo="${c}">${c === 'todos' ? 'AM + PM' : c}</button>`).join('')}</div>
+      <div class="seg">${['todos'].concat(CICLOS.filter(c => c !== 'N/D' || S.res.ciclos['N/D'].total)).map(c => `<button class="${S.ciclo === c ? 'on' : ''}" data-ciclo="${c}">${c === 'todos' ? 'Todos os ciclos' : c} <b style="font-weight:600;opacity:.7">${c === 'todos' ? S.res.gaiolas.length : S.res.ciclos[c].total}</b></button>`).join('')}</div>
       <input id="busca" class="search" placeholder="Buscar gaiola, rota ou ID do pacote…" value="${esc(S.busca)}"></div>
       <div class="chips">${chips.map(([k, l]) => `<button class="chip ${S.filtro === k ? 'on' : ''}" data-filtro="${k}">${l} <b>${base.filter(g => pass(g, k)).length}</b></button>`).join('')}</div>
       <div class="tw"><table><thead><tr><th>Gaiola</th><th>Ciclo</th><th>Rota</th><th>Onda</th><th>Doca</th><th>Bipados/Esperados</th><th>A mais</th><th>Faltante</th><th>Situação</th><th>Operador (bipou)</th><th>Operador (finalizou)</th></tr></thead><tbody>${rows || '<tr><td colspan="11" class="mut">Nenhuma gaiola neste filtro.</td></tr>'}</tbody></table></div>
@@ -586,7 +611,7 @@
       <div class="card"><div class="row between"><h3>Divergências por ID <span class="count">${lista.length}</span></h3>
         <div class="seg">${[['todos', 'Todos'], ['a_mais', 'A mais'], ['faltante', 'Faltante']].map(([k, l]) => `<button class="${f === k ? 'on' : ''}" data-div="${k}">${l}</button>`).join('')}</div></div>
       <p class="mut">Cada ID foi confrontado com a Separação: a gaiola/rota corretas vêm de onde o ID foi separado.</p>
-      <div class="tw"><table><thead><tr><th>ID</th><th>Tipo</th><th>Gaiola atual</th><th>Rota</th><th>Parada</th><th>Ponto</th><th>Localização do pacote</th><th>Detalhe</th><th>Gaiola correta</th><th>Rota correta p/ atrelar</th><th>Operador</th></tr></thead><tbody>
+      <div class="tw"><table><thead><tr><th>ID</th><th>Tipo</th><th>Bipado em</th><th>Rota</th><th>Parada</th><th>Ponto</th><th>Localização do pacote</th><th>Detalhe</th><th>Gaiola correta</th><th>Rota correta p/ atrelar</th><th>Operador</th></tr></thead><tbody>
       ${lista.slice(0, MAXROWS).map(d => `<tr><td><b>${esc(d.id)}</b></td><td>${tipoTxt(d.tipo)}</td><td>${esc(d.gaiolaAtual)}</td><td>${esc(d.rota)}</td><td>${esc(d.parada) || '–'}</td><td>${esc(d.ponto) || '–'}</td><td>${esc(d.local) || '–'}</td><td>${esc(d.detalhe) || '–'}</td><td>${esc(d.gaiolaCorreta) || 'não consta na separação'}</td><td>${esc(d.rotaCorreta) || '–'}</td><td>${esc(d.operador) || '–'}</td></tr>`).join('') || '<tr><td colspan="11" class="mut">Nenhuma divergência.</td></tr>'}</tbody></table></div>
       ${lista.length > MAXROWS ? `<p class="mut">Mostrando ${MAXROWS} de ${fmt(lista.length)}. Gere o PDF ou use a aba Gaiolas para detalhar.</p>` : ''}</div>`;
   }
@@ -594,7 +619,18 @@
   function vConclusao() {
     const gs = S.res.gaiolas, ok = gs.filter(g => g.status === 'fechada'), aj = gs.filter(g => g.status === 'ajustada'), { kpi } = S.res;
     const tb = (arr, aj2) => arr.slice(0, MAXROWS).map(g => `<tr class="click" data-g="${esc(g.gaiola)}"><td><b>${esc(g.gaiola)}</b></td><td>${g.ciclo}</td><td>${esc(g.rota)}</td><td>${g.bipados}/${g.esperados}</td>${aj2 ? `<td>${g.regN} ID(s) corrigido(s) na reauditoria</td>` : ''}<td>${esc(g.opFinal.join(', ')) || '–'}</td></tr>`).join('');
+    const A = S.res.ajustes, f = S.ajFiltro, nCor = A.filter(a => a.corrigido).length, nPend = A.length - nCor;
+    const lA = A.filter(a => f === 'todos' || (f === 'corrigido' ? a.corrigido : !a.corrigido));
+    const eTxt = t => t === 'a_mais' ? '<span class="badge" style="--c:#d97706">A mais</span>' : '<span class="badge" style="--c:#dc2626">Faltante</span>';
+    const sTxt = c => c ? '<span class="badge" style="--c:#16a34a">Corrigido</span>' : '<span class="badge" style="--c:#dc2626">Não corrigido</span>';
+    const ledger = `<div class="card"><div class="row between wrap"><h3>IDs ajustados: onde foi o erro e se foi corrigido <span class="count">${lA.length}</span></h3>
+        <div class="seg">${[['todos', 'Todos ' + A.length], ['corrigido', 'Corrigidos ' + nCor], ['pendente', 'Não corrigidos ' + nPend]].map(([k, l]) => `<button class="${f === k ? 'on' : ''}" data-aj="${k}">${l}</button>`).join('')}</div></div>
+      <p class="mut">O painel compara o histórico de auditorias de cada ID. Ao carregar uma nova auditoria ou separação, o resultado é atualizado.</p>
+      <div class="tw"><table><thead><tr><th>ID</th><th>Erro</th><th>Bipado em (erro)</th><th>Rota correta</th><th>Situação</th><th>Corrigido em</th><th>Rep (erro)</th><th>Rep (correção)</th><th>Data do erro</th></tr></thead><tbody>
+      ${lA.slice(0, MAXROWS).map(a => `<tr><td><b>${esc(a.id)}</b></td><td>${eTxt(a.erro)}</td><td>${esc(a.gaiolaErro)}</td><td>${esc(a.rotaCorreta) || 'não consta na separação'}</td><td>${sTxt(a.corrigido)}</td><td>${esc(a.gaiolaFinal) || '–'}</td><td>${esc(a.opErro) || '–'}</td><td>${esc(a.opCorrecao) || '–'}</td><td>${esc(a.dataErro) || '–'}</td></tr>`).join('') || '<tr><td colspan="9" class="mut">Nenhum ID com ajuste.</td></tr>'}</tbody></table></div></div>`;
     return `<div class="grid g-kpi3">${kpiCard('Conclusão da auditoria', pct(kpi.pct), kpi.pct >= 100 ? '#16a34a' : '#d97706', 'meta 100%')}${kpiCard('Fechadas 100%', fmt(ok.length), STATUS.fechada.cor)}${kpiCard('Ajustadas e fechadas sem erro', fmt(aj.length), STATUS.ajustada.cor)}</div>
+      <div class="grid g-kpi3">${kpiCard('IDs com erro', fmt(A.length), '#14213d')}${kpiCard('IDs corrigidos', fmt(nCor), STATUS.fechada.cor)}${kpiCard('IDs não corrigidos', fmt(nPend), STATUS.faltante.cor)}</div>
+      ${ledger}
       <div class="card"><h3>Gaiolas fechadas 100% <span class="count">${ok.length}</span></h3><div class="tw"><table><thead><tr><th>Gaiola</th><th>Ciclo</th><th>Rota</th><th>Bipados/Esperados</th><th>Operador (finalizou)</th></tr></thead><tbody>${tb(ok, false) || '<tr><td colspan="5" class="mut">Nenhuma ainda.</td></tr>'}</tbody></table></div></div>
       <div class="card"><h3>Gaiolas ajustadas (fechadas sem erro) <span class="count">${aj.length}</span></h3><p class="mut">Tiveram a mais ou faltante, mas foram reauditadas e o último registro de cada ID ficou Correto.</p><div class="tw"><table><thead><tr><th>Gaiola</th><th>Ciclo</th><th>Rota</th><th>Bipados/Esperados</th><th>Ajuste</th><th>Operador (finalizou)</th></tr></thead><tbody>${tb(aj, true) || '<tr><td colspan="6" class="mut">Nenhuma ainda.</td></tr>'}</tbody></table></div></div>`;
   }
@@ -642,7 +678,7 @@
     const tipoTxt = t => ({ a_mais: 'A mais', nao_localizado: 'A mais (ID não localizado)', faltante: 'Faltante', corrigido: 'Corrigido (reauditado como correto)', regularizado: 'Regularizado (sistema confirma aqui)', regularizado_falt: 'Regularizado (sistema indica outra gaiola)' }[t]);
     $('#modal-body').innerHTML = `<div class="row between"><h3>${esc(g.gaiola)} ${badge(g.status)}</h3><button class="btn sm ghost" id="m-x">Fechar</button></div>
       <div class="facts"><div><span>Ciclo</span><b>${g.ciclo}</b></div><div><span>Rota</span><b>${esc(g.rota) || '–'}</b></div><div><span>Bipados/Esperados</span><b>${g.bipados}/${g.esperados}</b></div><div><span>Operador que bipou</span><b>${esc(g.opBipou.join(', ')) || '–'}</b></div><div><span>Operador que finalizou</span><b>${esc(g.opFinal.join(', ')) || '–'}</b></div><div><span>Rota correta p/ atrelar</span><b>${esc(g.rotasCorretas.join(', ')) || '–'}</b></div><div><span>Última auditoria</span><b>${esc(g.data) || '–'}</b></div></div>
-      <div class="tw"><table><thead><tr><th>ID</th><th>Resultado</th><th>Gaiola correta</th><th>Rota correta</th><th>Parada</th><th>Ponto</th><th>Localização</th><th>Detalhe</th></tr></thead><tbody>${g.items.map(i => `<tr><td><b>${esc(i.id)}</b></td><td>${tipoTxt(i.tipo)}</td><td>${esc(i.gaiolaCorreta) || '–'}</td><td>${esc(i.rotaCorreta) || '–'}</td><td>${esc(i.parada) || '–'}</td><td>${esc(i.ponto) || '–'}</td><td>${esc(i.local) || '–'}</td><td>${esc(i.detalhe) || '–'}</td></tr>`).join('') || '<tr><td colspan="8" class="mut">Sem divergências de ID nesta gaiola.</td></tr>'}</tbody></table></div>`;
+      <div class="tw"><table><thead><tr><th>ID</th><th>Resultado</th><th>Gaiola correta</th><th>Rota correta</th><th>Parada</th><th>Ponto</th><th>Localização</th><th>Detalhe</th></tr></thead><tbody>${g.items.map(i => `<tr><td><b>${esc(i.id)}</b></td><td>${tipoTxt(i.tipo)}</td><td>${esc(i.gaiolaCorreta) || '<span style="color:#d97706">não consta na separação</span>'}</td><td>${esc(i.rotaCorreta) || '<span style="color:#d97706">não consta na separação</span>'}</td><td>${esc(i.parada) || '–'}</td><td>${esc(i.ponto) || '–'}</td><td>${esc(i.local) || '–'}</td><td>${esc(i.detalhe) || '–'}</td></tr>`).join('') || '<tr><td colspan="8" class="mut">Sem divergências de ID nesta gaiola.</td></tr>'}</tbody></table></div>`;
     $('#modal').classList.add('show'); $('#m-x').onclick = fecharModal;
   }
 
@@ -652,7 +688,7 @@
     Object.values(charts).forEach(c => c.destroy()); charts = {};
     const ks = Object.keys(STATUS), cnt = S.res.kpi.cnt;
     charts.status = new Chart($('#ch-status'), { type: 'doughnut', data: { labels: ks.map(k => STATUS[k].label), datasets: [{ data: ks.map(k => cnt[k]), backgroundColor: ks.map(k => STATUS[k].cor), borderWidth: 2, borderColor: '#fff' }] }, options: { maintainAspectRatio: false, cutout: '62%', plugins: { legend: { position: 'right', labels: { boxWidth: 12 } } } } });
-    const cs = ['AM', 'PM', 'N/D'].filter(c => S.res.ciclos[c].total);
+    const cs = CICLOS.filter(c => S.res.ciclos[c].total);
     charts.ciclo = new Chart($('#ch-ciclo'), { type: 'bar', data: { labels: cs, datasets: ks.map(k => ({ label: STATUS[k].label, data: cs.map(c => S.res.ciclos[c][k]), backgroundColor: STATUS[k].cor, borderRadius: 4 })) }, options: { maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } } }, plugins: { legend: { position: 'bottom', labels: { boxWidth: 10 } } } } });
   }
 
@@ -672,6 +708,7 @@
     $$('[data-ciclo]').forEach(b => b.onclick = () => { S.ciclo = b.dataset.ciclo; render(); });
     $$('[data-filtro]').forEach(b => b.onclick = () => { S.filtro = b.dataset.filtro; render(); });
     $$('[data-div]').forEach(b => b.onclick = () => { S.divTipo = b.dataset.div; render(); });
+    $$('[data-aj]').forEach(b => b.onclick = () => { S.ajFiltro = b.dataset.aj; render(); });
     $$('[data-adu]').forEach(b => b.onclick = () => { S.aduFiltro = b.dataset.adu; render(); });
     $$('[data-g]').forEach(r => r.onclick = () => abrirGaiola(r.dataset.g));
     $$('#view [data-up]').forEach(i => i.onchange = e => { carregar(i.dataset.up, e.target.files[0]); e.target.value = ''; });
@@ -699,7 +736,7 @@
     let y = 60;
     doc.autoTable({ startY: y, head: [['Total', 'Fechadas 100%', 'Ajustadas', 'Com a mais', 'Com faltante', 'Falta auditar', 'Canceladas']], body: [[kpi.total, c.fechada, c.ajustada, c.a_mais, c.faltante, c.pendente + c.aberta + c.em_auditoria, c.cancelado]], headStyles: head, styles: { halign: 'center' }, margin: { left: 14, right: 14 } });
     y = doc.lastAutoTable.finalY + 10; y = titulo('Resultado por ciclo', y);
-    doc.autoTable({ startY: y, head: [['Ciclo', 'Gaiolas', 'Fechadas', 'Ajustadas', 'A mais', 'Faltante', 'Falta auditar', 'Canceladas', '% fechadas']], body: ['AM', 'PM', 'N/D'].filter(k => ciclos[k].total).map(k => [k, ciclos[k].total, ciclos[k].fechada, ciclos[k].ajustada, ciclos[k].a_mais, ciclos[k].faltante, ciclos[k].pendente + ciclos[k].aberta + ciclos[k].em_auditoria, ciclos[k].cancelado, pct(ciclos[k].pct)]), headStyles: head, margin: { left: 14, right: 14 } });
+    doc.autoTable({ startY: y, head: [['Ciclo', 'Gaiolas', 'Fechadas', 'Ajustadas', 'A mais', 'Faltante', 'Falta auditar', 'Canceladas', '% fechadas']], body: CICLOS.filter(k => ciclos[k].total).map(k => [k, ciclos[k].total, ciclos[k].fechada, ciclos[k].ajustada, ciclos[k].a_mais, ciclos[k].faltante, ciclos[k].pendente + ciclos[k].aberta + ciclos[k].em_auditoria, ciclos[k].cancelado, pct(ciclos[k].pct)]), headStyles: head, margin: { left: 14, right: 14 } });
     y = doc.lastAutoTable.finalY + 10;
     if (charts.status) { try { doc.addImage(charts.status.toBase64Image(), 'PNG', 14, y, 90, 55); } catch (e) { } }
     if (charts.ciclo) { try { doc.addImage(charts.ciclo.toBase64Image(), 'PNG', 108, y, 88, 55); } catch (e) { } }
